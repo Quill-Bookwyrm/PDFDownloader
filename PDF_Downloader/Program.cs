@@ -8,6 +8,8 @@ using System.IO;
 using OfficeOpenXml;
 using System.Net;
 using System.Net.Http;
+using ClosedXML.Excel;
+using System.ComponentModel.DataAnnotations;
 
 
 namespace PDF_Downloader
@@ -15,24 +17,78 @@ namespace PDF_Downloader
     class Program
     {
         private static string inputFilePath = "C:\\PDF\\Input\\GRI_2017_2020.xlsx";
+        private static string metaDataPath = "C:\\PDF\\Output\\meta\\MetaData.xlsx";
         private string outputFilePath = "C:\\PDF\\Output";
         private string downloadedFilePath = "C:\\PDF\\Output\\down";
 
         static void Main(string[] args)
         {
             List<Document> docs = new List<Document>(GetDocuments());
+            docs = CheckMetadata(docs);
 
             Console.Read();
         }
+        public static List<Document> CheckMetadata(List<Document> documents)
+        {
+            if (new XLWorkbook(metaDataPath) == null)
+            {
+                var wb = new XLWorkbook();
+                var ws = wb.Worksheets.Add("Meta Data");
+                int i = 2;
+
+                ws.Cell("A1").Value = "BRnum";
+                ws.Cell("B1").Value = "Downloaded";
+                ws.Cell("C1").Value = "Pdf_URL";
+                ws.Cell("D1").Value = "Report Html Address";
+                var rangeTable = ws.Range("A1:D1");
+                rangeTable.FirstCell().Style
+                    .Font.SetBold()
+                    .Fill.SetBackgroundColor(XLColor.Aqua);
+
+                foreach(Document doc in documents)
+                {
+                    ws.Cell($"A{i}").Value = doc.BrNumber;
+                    ws.Cell($"B{i}").Value = "No";
+                    ws.Cell($"C{i}").Value = doc.Url;
+                    ws.Cell($"D{i}").Value = doc.BackupUrl;
+                    i++;
+                }
+
+                ws.Columns().AdjustToContents(1, 4);
+                wb.SaveAs("MetaData.xlsx");
+                File.Move("..\\MetaData.xlsx", "C:\\PDF\\Output\\meta\\MetaData.xlsx");
+            }
+            else
+            {
+                List<int> brnums = new List<int>();
+                var workbook = new XLWorkbook(metaDataPath);
+                var ws = workbook.Worksheet("Meta Data");
+                var totalRows = ws.RowsUsed().Count();
+                for (int rowNum = 2; rowNum <= totalRows; rowNum++)
+                {
+                    string s;
+                    s = ws.Cell($"A{rowNum}").Value
+                        .ToString()
+                        .Substring(2);
+                    brnums.Add(Int32.Parse(s));
+                }
+
+                for (int i = 2; i <= totalRows; i++)
+                {
+                    foreach (Document doc in documents)
+                    {
+                        if (brnums.Contains(Int32.Parse(doc.BrNumber.Substring(2))))
+                        {
+                            documents.Remove(doc);
+                        }
+                    }
+                }
+            }
+
+            return documents;
+        }
         public async Task DownloadDocumentsAsync(List<Document> documents)
         {
-            //using (WebClient client = new WebClient())
-            //{
-            //    foreach (Document doc in documents)
-            //    {
-            //        client.DownloadFile(doc.Url, doc.BrNumber);
-
-            //    }
             var httpClient = new HttpClient();
             foreach (Document doc in documents)
             {
@@ -44,35 +100,64 @@ namespace PDF_Downloader
         public static List<Document> GetDocuments()
         {
             List<Document> documents = new List<Document>();
-            using (ExcelPackage xlPackage = new ExcelPackage(new FileInfo($@"{inputFilePath}")))
+            using (XLWorkbook xlwb = new XLWorkbook(inputFilePath))
             {
-                
-                var myWorksheet = xlPackage.Workbook.Worksheets.First();
-                var totalRows = myWorksheet.Dimension.End.Row;
-                var totalColumns = myWorksheet.Dimension.End.Column;
-                int urlIndex = myWorksheet
-                .Cells["1:1"]
-                .First(c => c.Value.ToString() == "Pdf_URL")
-                .Start
-                .Column;
-                int backupUrlIndex = urlIndex + 1;
+                var myWorksheet = xlwb.Worksheet("0");
+                var totalRows = myWorksheet.RowsUsed().Count();
+                var range = myWorksheet.RangeUsed();
+                var table = range.AsTable();
 
-                for (int rowNum = 1; rowNum <= totalRows; rowNum++)
+                for (int rowNum = 2; rowNum <= totalRows; rowNum++)
                 {
-                    var brNum = myWorksheet.Cells[rowNum, 0, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
-                    var url = myWorksheet.Cells[rowNum, urlIndex, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
-                    var backupUrl = myWorksheet.Cells[rowNum, backupUrlIndex, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
-
+                    var url = "";
+                    var backupUrl = "";
                     Document doc = new Document();
-                    doc.BrNumber = string.Join("", brNum);
-                    doc.Url = string.Join("", url);
-                    if (backupUrl != null)
+
+                    var cellOne = table.FindColumn(c => c.FirstCell().Value.ToString() == "Pdf_URL");
+                    if (cellOne != null)
                     {
-                        doc.BackupUrl = string.Join("", backupUrl);
+                        var columnLetter = cellOne.RangeAddress.FirstAddress.ColumnLetter;
+                        var brNum = myWorksheet.Cell(rowNum, 1).Value.ToString();
+                        url = myWorksheet.Cell(rowNum, columnLetter).Value.ToString();
+                        doc.Url = url;
+                        doc.BrNumber = brNum;
+
+                        var cellTwo = table.FindColumn(c => c.FirstCell().Value.ToString() == "Report Html Address");
+                        if (cellTwo != null)
+                        {
+                            columnLetter = cellTwo.RangeAddress.FirstAddress.ColumnLetter;
+                            backupUrl = myWorksheet.Cell(rowNum, columnLetter).Value.ToString();
+                            doc.BackupUrl = backupUrl;
+                        }
                     }
 
                     documents.Add(doc);
                 }
+                //var myWorksheet = xlPackage.Workbook.Worksheets.First();
+                //var totalRows = myWorksheet.Dimension.End.Row;
+                //var totalColumns = myWorksheet.Dimension.End.Column;
+                //int urlIndex = myWorksheet
+                //.Cells["1:1"]
+                //.First(c => c.Value.ToString() == "Pdf_URL")
+                //.Start
+                //.Column;
+                //int backupUrlIndex = urlIndex + 1;
+
+                //for (int rowNum = 1; rowNum <= totalRows; rowNum++)
+                //{
+                //    var brNum = myWorksheet.Cells[rowNum, 0, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
+                //    var url = myWorksheet.Cells[rowNum, urlIndex, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
+                //    var backupUrl = myWorksheet.Cells[rowNum, backupUrlIndex, rowNum, totalColumns].Select(c => c.Value == null ? string.Empty : c.Value.ToString());
+
+                //    Document doc = new Document();
+                //    doc.BrNumber = string.Join("", brNum);
+                //    doc.Url = string.Join("", url);
+                //    if (backupUrl != null)
+                //    {
+                //        doc.BackupUrl = string.Join("", backupUrl);
+                //    }
+
+                //    documents.Add(doc);
             }
             return documents;
         }
@@ -95,9 +180,7 @@ namespace PDF_Downloader
         }
         public Document()
         {
-            
         }
-
         public string BrNumber { get => _brNumber; set => _brNumber = value; }
         public string Url { get => _url; set => _url = value; }
         public string BackupUrl { get => _backupUrl; set => _backupUrl = value; }
