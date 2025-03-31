@@ -10,6 +10,7 @@ using System.Net;
 using System.Net.Http;
 using ClosedXML.Excel;
 using System.ComponentModel.DataAnnotations;
+using System.Threading;
 
 
 namespace PDF_Downloader
@@ -26,26 +27,29 @@ namespace PDF_Downloader
             List<Document> docs = new List<Document>(GetDocuments());
             docs = CheckMetadata(docs);
 
+            Console.WriteLine("\nDownload finished, press any key to close the program");
             Console.Read();
         }
+        
         public static List<Document> CheckMetadata(List<Document> documents)
         {
-            if (new XLWorkbook(metaDataPath) == null)
+            List<Document> fixedDocuments = new List<Document>();
+            if (!File.Exists(metaDataPath))
             {
                 var wb = new XLWorkbook();
                 var ws = wb.Worksheets.Add("Meta Data");
-                int i = 2;
-
                 ws.Cell("A1").Value = "BRnum";
                 ws.Cell("B1").Value = "Downloaded";
                 ws.Cell("C1").Value = "Pdf_URL";
                 ws.Cell("D1").Value = "Report Html Address";
-                var rangeTable = ws.Range("A1:D1");
+                ws.Cell("A1").SetActive();
+                var rangeTable = ws.Range(1, 1, 1, 4);
                 rangeTable.FirstCell().Style
                     .Font.SetBold()
                     .Fill.SetBackgroundColor(XLColor.Aqua);
 
-                foreach(Document doc in documents)
+                int i = 2;
+                foreach (Document doc in documents)
                 {
                     ws.Cell($"A{i}").Value = doc.BrNumber;
                     ws.Cell($"B{i}").Value = "No";
@@ -56,7 +60,7 @@ namespace PDF_Downloader
 
                 ws.Columns().AdjustToContents(1, 4);
                 wb.SaveAs("MetaData.xlsx");
-                File.Move("..\\MetaData.xlsx", "C:\\PDF\\Output\\meta\\MetaData.xlsx");
+                File.Move("MetaData.xlsx", metaDataPath);
             }
             else
             {
@@ -77,12 +81,13 @@ namespace PDF_Downloader
                 {
                     foreach (Document doc in documents)
                     {
-                        if (brnums.Contains(Int32.Parse(doc.BrNumber.Substring(2))))
+                        if (!brnums.Contains(Int32.Parse(doc.BrNumber.Substring(2))) && ws.Cell($"B{i}").Value.ToString().Contains("No"))
                         {
-                            documents.Remove(doc);
+                            fixedDocuments.Add(doc);
                         }
                     }
                 }
+                return fixedDocuments;
             }
 
             return documents;
@@ -90,12 +95,53 @@ namespace PDF_Downloader
         public async Task DownloadDocumentsAsync(List<Document> documents)
         {
             var httpClient = new HttpClient();
+            var allTasks = new List<Task>();
+            var throttler = new SemaphoreSlim(initialCount: 10);
+
+            var wb = new XLWorkbook(metaDataPath);
+            var ws = wb.Worksheet("Meta Data");
+            var range = ws.RangeUsed();
+            var table = range.AsTable();
+
             foreach (Document doc in documents)
             {
-                var responseStream = await httpClient.GetStreamAsync(doc.Url);
-                var fileStream = new FileStream(outputFilePath, FileMode.Create);
-                responseStream.CopyTo(fileStream);
+                await throttler.WaitAsync();
+
+                allTasks.Add(
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (!httpClient.GetStreamAsync(doc.Url).IsFaulted)
+                            {
+                                var responseStream = await httpClient.GetStreamAsync(doc.Url);
+                                var fileStream = new FileStream(outputFilePath, FileMode.Create);
+                                responseStream.CopyTo(fileStream);
+
+                                var cell = table.FindRow(c => c.FirstCell().Value.ToString() == $"{doc.BrNumber}");
+                                cell.Cell($"B{cell.RowNumber()}").Value = "Yes";
+                            }
+                            else if (!httpClient.GetStreamAsync(doc.BackupUrl).IsFaulted)
+                            {
+                                var responseStream = await httpClient.GetStreamAsync(doc.BackupUrl);
+                                var fileStream = new FileStream(outputFilePath, FileMode.Create);
+                                responseStream.CopyTo(fileStream);
+
+                                var cell = table.FindRow(c => c.FirstCell().Value.ToString() == $"{doc.BrNumber}");
+                                cell.Cell($"B{cell.RowNumber()}").Value = "Yes";
+                            }
+                            else
+                            {
+                                Console.WriteLine($"Failed to download {doc.BrNumber}");
+                            }
+                        }
+                        finally
+                        {
+                            throttler.Release();
+                        }
+                    }));
             }
+            await Task.WhenAll(allTasks);
         }
         public static List<Document> GetDocuments()
         {
